@@ -316,78 +316,95 @@ CRITICAL RULES:
 10. Each item MUST include an "explanation" string (one or two sentences) explaining the correct answer
 11. Return ONLY JSON array"""
 
-    try:
-        logging.info(f"🤖 Requesting AI for {count} questions on {topic}...")
-        response = ai_client.models.generate_content(
-            model='gemini-3.8-flash',
-            contents=prompt,
-        )
-        
-        logging.info(f"📝 Response received: {response.text[:100]}...")
-        clean_text = response.text.strip()
-        
-        # Clean markdown
-        clean_text = clean_text.replace("```json", "").replace("```", "").strip()
-        
-        # Advanced Regex cleaning to extract only JSON array if extra text is present
-        match = re.search(r'\[.*\]', clean_text, re.DOTALL)
-        if match:
-            clean_text = match.group(0)
+    max_retries = 3
+    retry_delay = 2  # सेकंड
+
+    for attempt in range(max_retries):
+        try:
+            logging.info(f"🤖 Requesting AI for {count} questions on {topic}...")
             
-        questions = json.loads(clean_text)
-        
-        # ✅ Validation Loop
-        valid_questions = []
-        for idx, q in enumerate(questions):
-            try:
-                if not q.get("question") or not q.get("options"):
-                    logging.warning(f"Skipping invalid question: {q}")
+            # ✅ FIX: नए SDK के अनुसार interactions.create का उपयोग और सही मॉडल
+            response = ai_client.interactions.create(
+                model='gemini-3.8-flash',
+                input=prompt,
+            )
+            
+            # ✅ FIX: response.text की जगह response.output_text का उपयोग
+            if not response.output_text:
+                logging.warning("⚠️ AI returned empty output_text")
+                return None
+
+            logging.info(f"📝 Response received: {response.output_text[:100]}...")
+            clean_text = response.output_text.strip()
+            
+            # Clean markdown
+            clean_text = clean_text.replace("```json", "").replace("```", "").strip()
+            
+            # Advanced Regex cleaning to extract only JSON array
+            match = re.search(r'\[.*\]', clean_text, re.DOTALL)
+            if match:
+                clean_text = match.group(0)
+                
+            questions = json.loads(clean_text)
+            break  # सफलता मिलने पर रीट्राई लूप से बाहर निकलें
+
+        except Exception as e:
+            # ✅ FIX: 503 या UNAVAILABLE एरर आने पर ऑटोमैटिक रीट्राई करें
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                if attempt < max_retries - 1:
+                    logging.warning(f"🔄 AI बिजी है (503)। {retry_delay} सेकंड में दोबारा प्रयास कर रहे हैं...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # एक्सपोनेंशियल बैकऑफ़
                     continue
-                
-                correct_idx = q.get("correct", 0)
-                
-                # Ensure correct is INTEGER and valid
-                if not isinstance(correct_idx, int):
-                    try:
-                        correct_idx = int(correct_idx)
-                    except (ValueError, TypeError):
-                        correct_idx = 0
-                
-                # Validate index range
-                if correct_idx < 0 or correct_idx >= len(q["options"]):
-                    logging.warning(f"Q{idx}: Invalid index {correct_idx}, using 0")
-                    correct_idx = 0
-                
-                q["correct"] = correct_idx
-                
-                # Explanation fallback handling
-                if "explanation" not in q or not q["explanation"]:
-                    q["explanation"] = f"The correct answer is option {correct_idx + 1}."
-                    
-                valid_questions.append(q)
-                logging.info(f"✅ Q{len(valid_questions)}: '{q['question'][:40]}...' | Correct at index {correct_idx}")
-                
-            except Exception as q_err:
-                logging.warning(f"Question parse error: {q_err}")
-                continue
-        
-        # ✅ NEW LOGIC: अगर मांगे गए काउंट से कम मिले पर न्यूनतम 10 (या मांगे गए काउंट से कम पर कम से कम 10) सवाल मिल गए हैं तो पास करें
-        min_required = min(10, count) # अगर यूज़र ने खुद ही 5 या 10 से कम माँगे हों तो उसके लिए सेफ-गार्ड
-        
-        if len(valid_questions) >= min_required:
-            logging.info(f"✅ Minimum threshold met. Proceeding with {len(valid_questions)} questions.")
-            return valid_questions[:count]
-        else:
-            # 10 से कम होने पर ही कैंसिल होगा
-            logging.warning(f"⚠️ Only {len(valid_questions)} questions received. Less than minimum {min_required}. Cancelling.")
+            
+            logging.error(f"❌ AI Generation Error: {e}", exc_info=True)
             return None
-        
-    except json.JSONDecodeError as je:
-        logging.error(f"❌ JSON Parse Error: {je}")
+            
+    # ✅ Validation Loop (यह आपकी ओरिजिनल वैलिडेशन लॉजिक है)
+    valid_questions = []
+    for idx, q in enumerate(questions):
+        try:
+            if not q.get("question") or not q.get("options"):
+                logging.warning(f"Skipping invalid question: {q}")
+                continue
+            
+            correct_idx = q.get("correct", 0)
+            
+            # Ensure correct is INTEGER and valid
+            if not isinstance(correct_idx, int):
+                try:
+                    correct_idx = int(correct_idx)
+                except (ValueError, TypeError):
+                    correct_idx = 0
+            
+            # Validate index range
+            if correct_idx < 0 or correct_idx >= len(q["options"]):
+                logging.warning(f"Q{idx}: Invalid index {correct_idx}, using 0")
+                correct_idx = 0
+            
+            q["correct"] = correct_idx
+            
+            # Explanation fallback handling
+            if "explanation" not in q or not q["explanation"]:
+                q["explanation"] = f"The correct answer is option {correct_idx + 1}."
+                
+            valid_questions.append(q)
+            logging.info(f"✅ Q{len(valid_questions)}: '{q['question'][:40]}...' | Correct at index {correct_idx}")
+            
+        except Exception as q_err:
+            logging.warning(f"Question parse error: {q_err}")
+            continue
+    
+    # ✅ Minimum threshold met logic
+    min_required = min(10, count)
+    
+    if len(valid_questions) >= min_required:
+        logging.info(f"✅ Minimum threshold met. Proceeding with {len(valid_questions)} questions.")
+        return valid_questions[:count]
+    else:
+        logging.warning(f"⚠️ Only {len(valid_questions)} questions received. Less than minimum {min_required}. Cancelling.")
         return None
-    except Exception as e:
-        logging.error(f"❌ AI Generation Error: {e}", exc_info=True)
-        return None
+
 
 # --- BOT ROUTINES & HANDLERS ---
 async def autoquiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -584,53 +601,56 @@ async def handle_time_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         try:
             # स्टेप 2: 3 सेकंड का होल्ड
             await asyncio.sleep(3)
-            try: await generating_msg.delete()
-            except: pass
-            generating_msg = await update.message.reply_text(
-                "<b>🚀 AI Quiz Generator</b>\n\n"
-                "🟪🟪🟪⬜⬜⬜⬜⬜⬜⬜⬜⬜\n"
-                "🧠 Crafting questions...\n"
-                "⏳ please wait...",
-                parse_mode="HTML"
-            )
+            if not task.done(): # सिर्फ तभी बदलें जब टास्क अभी भी चल रहा हो
+                try: await generating_msg.delete()
+                except: pass
+                generating_msg = await update.message.reply_text(
+                    "<b>🚀 AI Quiz Generator</b>\n\n"
+                    "🟪🟪🟪⬜⬜⬜⬜⬜⬜⬜⬜⬜\n"
+                    "🧠 Crafting questions...\n"
+                    "⏳ please wait...",
+                    parse_mode="HTML"
+                )
                 
-            # स्टेप 3: और 3 सेकंड का होल्ड (कुल 6 सेकंड)
+            # स्टेप 3: और 4 सेकंड का होल्ड (कुल 7 सेकंड)
             await asyncio.sleep(4)
-            try: await generating_msg.delete()
-            except: pass
-            generating_msg = await update.message.reply_text(
-                "<b>🚀 AI Quiz Generator</b>\n\n"
-                "🟪🟪🟪🟪🟪🟪🟪⬜⬜⬜⬜⬜\n"
-                "✍️ Writing options...\n"
-                "⏳ please wait...",
-                parse_mode="HTML"
-            )
+            if not task.done():
+                try: await generating_msg.delete()
+                except: pass
+                generating_msg = await update.message.reply_text(
+                    "<b>🚀 AI Quiz Generator</b>\n\n"
+                    "🟪🟪🟪🟪🟪🟪🟪⬜⬜⬜⬜⬜\n"
+                    "✍️ Writing options...\n"
+                    "⏳ please wait...",
+                    parse_mode="HTML"
+                )
                 
-            # स्टेप 4: और 3 सेकंड का होल्ड (कुल 9 सेकंड)
+            # स्टेप 4: और 5 सेकंड का होल्ड (कुल 12 सेकंड - रीट्राई के लिए सेफ बफर)
             await asyncio.sleep(5)
-            try: await generating_msg.delete()
-            except: pass
-            generating_msg = await update.message.reply_text(
-                "<b>🚀 AI Quiz Generator</b>\n\n"
-                "🟪🟪🟪🟪🟪🟪🟪🟪🟪🟪⬜⬜\n"
-                "✅ Verifying answers...\n"
-                "⏳ please wait...",
-                parse_mode="HTML"
-            )
+            if not task.done():
+                try: await generating_msg.delete()
+                except: pass
+                generating_msg = await update.message.reply_text(
+                    "<b>🚀 AI Quiz Generator</b>\n\n"
+                    "🟪🟪🟪🟪🟪🟪🟪🟪🟪🟪⬜⬜\n"
+                    "🔄 API Retrying / Verifying answers...\n"
+                    "⏳ please wait...",
+                    parse_mode="HTML"
+                )
             
         except Exception as msg_err:
             logging.warning(f"Animation message sequence alert: {msg_err}")
 
-        # ⚡ AI का फाइनल रिजल्ट आने तक रुकें (अगर ज़्यादा टाइम लेगा तो स्टेप 4 स्क्रीन पर दिखेगा)
+        # ⚡ AI का फाइनल रिजल्ट आने तक रुकें
         ai_questions = await task
         
-        # ❌ फेलियर हैंडलिंग
-        if not ai_questions or len(ai_questions) == 0:
+        # ❌ फेलियर हैंडलिंग (None और 0 दोनों स्थितियों के लिए सुरक्षित)
+        if ai_questions is None or len(ai_questions) == 0:
             try: await generating_msg.delete()
             except: pass
             await update.message.reply_text(
                 "❌ <b>AI Quiz Generator Error</b>\n\n"
-                "aapka quiz genrate karne me error aa gaya tha esliye cancel ho gaya aap fir se quiz generate kare",
+                "Server par heavy load ya error ke karan quiz generate nahi ho paya. Kripya thodi der baad fir se koshish karein.",
                 parse_mode="HTML"
             )
             context.user_data.clear()
@@ -646,7 +666,7 @@ async def handle_time_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 "🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩",
                 parse_mode="HTML"
             )
-            await asyncio.sleep(4) # यूज़र को ग्रीन बार देखने का समय दें
+            await asyncio.sleep(2) # यूज़र को ग्रीन बार देखने का थोड़ा समय दें
             try: await generating_msg.delete()
             except: pass
         except Exception:
@@ -702,12 +722,13 @@ async def handle_time_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return NEGATIVE
         
     except Exception as e:
-        logging.error(f"Error in handle_time_limit: {e}")
+        logging.error(f"Error in handle_time_limit: {e}", exc_info=True)
         try: await generating_msg.delete()
         except: pass
         await update.message.reply_text("aapka quiz genrate karne me error aa gaya tha esliye cancel ho gaya aap fir se quiz generate kare", parse_mode="HTML")
         context.user_data.clear()
         return ConversationHandler.END
+
 
 # Final Summary aur Quiz Generation Confirmation
 async def handle_negative_and_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
