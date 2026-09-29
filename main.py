@@ -319,7 +319,7 @@ CRITICAL RULES:
     try:
         logging.info(f"🤖 Requesting AI for {count} questions on {topic}...")
         response = ai_client.models.generate_content(
-            model='gemini-3.8-flash',
+            model='gemini-1.5-flash',
             contents=prompt,
         )
         
