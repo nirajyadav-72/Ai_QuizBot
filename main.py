@@ -726,10 +726,19 @@ async def handle_time_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         logging.error(f"Error in handle_time_limit: {e}", exc_info=True)
         try: await generating_msg.delete()
         except: pass
-        await update.message.reply_text("aapka quiz genrate karne me error aa gaya tha esliye cancel ho gaya aap fir se quiz generate kare", parse_mode="HTML")
+        
+        # 429 एरर के लिए यूज़र फ्रेंडली मैसेज
+        if "429" in str(e) or "too_many_requests" in str(e):
+            await update.message.reply_text(
+                "⚠️ **आज का फ्री लिमिट कोटा समाप्त हो चुका है!**\n\n"
+                "AI मॉडल की प्रतिदिन की सीमा (20 रिक्वेस्ट) पूरी हो गई है। कृपया कुछ समय बाद या कल दोबारा प्रयास करें।", 
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("aapka quiz genrate karne me error aa gaya tha esliye cancel ho gaya aap fir se quiz generate kare", parse_mode="HTML")
+            
         context.user_data.clear()
         return ConversationHandler.END
-
 
 # Final Summary aur Quiz Generation Confirmation
 async def handle_negative_and_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
